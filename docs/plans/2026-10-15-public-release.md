@@ -23,4 +23,8 @@
 - 图标已完成并实际检查 32px / 128px 显示；PNG 为 1024px 且含透明通道，ICNS 可解出全部标准与 Retina 尺寸。
 - `go test -race ./...` 与 `go vet ./...` 通过；新安装与已有配置兼容测试通过。
 - macOS arm64 发布包构建成功，版本命令返回 `1.0.0`；已核对压缩包目录、源码与二进制中的私人信息。
-- 正在创建公开根提交、仓库及 Release，随后下载公开产物验收。
+- 公开仓库已建立：<https://github.com/ump45nose/skysight-sync>，默认分支 `main`，许可证识别为 MIT；公开历史从独立根提交开始，远端只有公开分支与版本标签。
+- GitHub CI 的测试、vet 和 macOS arm64 打包全部通过：<https://github.com/ump45nose/skysight-sync/actions/runs/38726671928>。
+- `v1.0.0` 已正式发布：<https://github.com/ump45nose/skysight-sync/releases/tag/v1.0.0>，包含程序压缩包、PNG、ICNS 和下载校验文件。
+- 已从 Release 下载全部附件并通过传输完整性校验，实际执行发布包中的程序，版本返回 `1.0.0`。
+- 已启用 GitHub 私密漏洞报告。本轮图标、公开仓库和版本发布均已完成。
