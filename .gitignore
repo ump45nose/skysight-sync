@@ -1,0 +1,4 @@
+/dist/
+/private/
+*.test
+.DS_Store
