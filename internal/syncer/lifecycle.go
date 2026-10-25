@@ -67,6 +67,7 @@ type Status struct {
 	FailureSince       *time.Time     `json:"failure_since,omitempty"`
 	Error              string         `json:"error,omitempty"`
 	Restored           bool           `json:"restored"`
+	Issues             []FileIssue    `json:"issues,omitempty"`
 }
 
 func (e *Engine) Status() (Status, error) {
@@ -75,6 +76,7 @@ func (e *Engine) Status() (Status, error) {
 		return Status{}, err
 	}
 	status := Status{Device: e.Config.DeviceID, Version: Version, LastSuccess: s.LastSuccess, Cutoff: s.Cutoff, Windows: len(s.Published), Suppressed: len(s.Suppressed), FailureSince: s.FailureSince, Error: s.LastError, Restored: s.Restored}
+	status.Issues = sortedIssues(s)
 	_, err = os.Stat(filepath.Join(e.Root, "pending.json"))
 	if err == nil {
 		status.PendingPublication = true
@@ -165,7 +167,7 @@ func LaunchAgent(configPath, executable, root string) string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>%s</string>
-<key>ProgramArguments</key><array><string>%s</string><string>--config</string><string>%s</string><string>sync</string><string>--scheduled</string></array>
+<key>ProgramArguments</key><array><string>%s</string><string>--config</string><string>%s</string><string>sync</string><string>--archive-only</string><string>--scheduled</string></array>
 <key>RunAtLoad</key><true/>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>TZ</key><string>Asia/Shanghai</string></dict>

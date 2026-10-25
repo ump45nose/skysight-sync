@@ -97,6 +97,8 @@ func run() error {
 		fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 		dry := fs.Bool("dry-run", false, "show changes without writing locally or remotely")
 		scheduled := fs.Bool("scheduled", false, "background retries and failure notification")
+		archiveOnly := fs.Bool("archive-only", false, "transfer immutable archives without rewriting or retiring native summaries")
+		force := fs.Bool("force", false, "check for updates even after a successful daily publication")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -106,6 +108,7 @@ func run() error {
 		if *dry && *scheduled {
 			return fmt.Errorf("dry-run and scheduled are mutually exclusive")
 		}
+		engine.ArchiveOnly, engine.Force = *archiveOnly, *force
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		attempts := 1
@@ -127,9 +130,13 @@ func run() error {
 			cancel()
 			err = x
 			if err == nil {
+				for _, issue := range report.Issues {
+					fmt.Fprintf(os.Stderr, "%s summary issue: %s/%s: %s\n", time.Now().UTC().Format(time.RFC3339), issue.Device, issue.Filename, issue.Reason)
+				}
 				if !*scheduled {
 					return printJSON(report)
 				}
+				fmt.Printf("%s archive sync succeeded: device=%s cutoff=%s upload=%d download=%d issues=%d\n", time.Now().UTC().Format(time.RFC3339), report.Device, report.Cutoff.Format(time.RFC3339), len(report.Upload), len(report.Download), len(report.Issues))
 				return nil
 			}
 			fmt.Fprintf(os.Stderr, "%s sync failed: %v\n", time.Now().UTC().Format(time.RFC3339), err)

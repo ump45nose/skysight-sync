@@ -19,7 +19,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const Version = "1.0.0"
+const Version = "1.0.3"
+const renderVersion = 3
 const MaxDocument = 8 << 20
 const MaxManifest = 32 << 20
 
@@ -107,17 +108,19 @@ type Published struct {
 	Digest   string   `json:"sha256"`
 }
 type State struct {
-	Sources      map[string]Manifest  `json:"sources"`
-	Native       map[string]NativeRef `json:"native"`
-	Published    map[string]Published `json:"published"`
-	Suppressed   map[string]bool      `json:"suppressed"`
-	LastSuccess  *time.Time           `json:"last_success,omitempty"`
-	SuccessDay   string               `json:"success_day,omitempty"`
-	Cutoff       time.Time            `json:"cutoff"`
-	FailureSince *time.Time           `json:"failure_since,omitempty"`
-	LastError    string               `json:"last_error,omitempty"`
-	Notified     bool                 `json:"notified,omitempty"`
-	Restored     bool                 `json:"restored,omitempty"`
+	RenderVersion int                  `json:"render_version"`
+	Sources       map[string]Manifest  `json:"sources"`
+	Native        map[string]NativeRef `json:"native"`
+	Published     map[string]Published `json:"published"`
+	Suppressed    map[string]bool      `json:"suppressed"`
+	LastSuccess   *time.Time           `json:"last_success,omitempty"`
+	SuccessDay    string               `json:"success_day,omitempty"`
+	Cutoff        time.Time            `json:"cutoff"`
+	FailureSince  *time.Time           `json:"failure_since,omitempty"`
+	LastError     string               `json:"last_error,omitempty"`
+	Notified      bool                 `json:"notified,omitempty"`
+	Restored      bool                 `json:"restored,omitempty"`
+	Issues        map[string]FileIssue `json:"issues,omitempty"`
 }
 
 func emptyState() State {
@@ -134,6 +137,9 @@ func loadState(root string) (State, error) {
 	}
 	if s.Sources == nil || s.Native == nil || s.Published == nil || s.Suppressed == nil {
 		return s, errors.New("incomplete state.json; restore from a saved checkpoint")
+	}
+	if s.Issues == nil {
+		s.Issues = map[string]FileIssue{}
 	}
 	for window, p := range s.Published {
 		if _, _, err := ParseName(p.Filename); err != nil {
@@ -201,12 +207,21 @@ type Frontmatter struct {
 	Applications []string `yaml:"applications"`
 }
 type Summary struct {
-	Device   string
-	Entry    Entry
-	Start    time.Time
-	Duration time.Duration
-	Meta     Frontmatter
-	Raw      []byte
+	Device            string
+	Entry             Entry
+	Start             time.Time
+	Duration          time.Duration
+	Meta              Frontmatter
+	Body              string
+	Raw               []byte
+	MetadataRecovered bool
+}
+
+// Content validation is distinct from I/O, transport and integrity failures.
+var ErrInvalidSummary = errors.New("invalid summary content")
+
+func invalidSummary(name, reason string) error {
+	return fmt.Errorf("%w: %s: %s", ErrInvalidSummary, name, reason)
 }
 
 func Parse(device, name string, b []byte) (Summary, error) {
@@ -214,14 +229,14 @@ func Parse(device, name string, b []byte) (Summary, error) {
 	var err error
 	s.Start, s.Duration, err = ParseName(name)
 	if err != nil {
-		return s, err
+		return s, invalidSummary(name, "invalid filename timestamp")
 	}
 	if len(b) > MaxDocument {
-		return s, errors.New("summary exceeds 8 MiB")
+		return s, invalidSummary(name, "summary exceeds 8 MiB")
 	}
 	normalized := bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 	if !bytes.HasPrefix(normalized, []byte("---\n")) {
-		return s, fmt.Errorf("missing YAML frontmatter: %s", name)
+		return s, invalidSummary(name, "missing YAML frontmatter")
 	}
 	front := normalized[4:]
 	end := bytes.Index(front, []byte("\n---\n"))
@@ -229,14 +244,36 @@ func Parse(device, name string, b []byte) (Summary, error) {
 		end = len(front) - 4
 	}
 	if end < 0 {
-		return s, fmt.Errorf("unterminated YAML: %s", name)
+		return s, invalidSummary(name, "unterminated YAML")
 	}
 	if err = yaml.Unmarshal(normalized[4:4+end], &s.Meta); err != nil {
-		return s, fmt.Errorf("%s: %w", name, err)
+		// Native generators sometimes emit an unquoted ': ' in these scalar
+		// fields. Quote only that unambiguous case in memory; keep Raw and its
+		// immutable transfer digest exactly as produced by the source.
+		header := strings.Split(string(normalized[4:4+end]), "\n")
+		changed := false
+		for i, line := range header {
+			key, value, ok := strings.Cut(line, ":")
+			value = strings.TrimSpace(value)
+			if !ok || (key != "title" && key != "description") || !strings.Contains(value, ": ") ||
+				strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") || strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">") {
+				continue
+			}
+			quoted, _ := json.Marshal(value)
+			header[i] = key + ": " + string(quoted)
+			changed = true
+		}
+		s.Meta = Frontmatter{}
+		if !changed || yaml.Unmarshal([]byte(strings.Join(header, "\n")), &s.Meta) != nil {
+			return s, invalidSummary(name, "invalid YAML frontmatter")
+		}
+		s.MetadataRecovered = true
 	}
 	if strings.TrimSpace(s.Meta.Title) == "" || strings.TrimSpace(s.Meta.Description) == "" || s.Meta.Applications == nil {
-		return s, fmt.Errorf("missing title, description or applications: %s", name)
+		return s, invalidSummary(name, "missing title, description or applications")
 	}
+	bodyStart := 4 + end + len("\n---")
+	s.Body = strings.TrimSpace(string(normalized[bodyStart:]))
 	return s, nil
 }
 
@@ -305,18 +342,12 @@ func objectPath(root, device string, e Entry) string {
 	return filepath.Join(root, "archive", device, "objects", e.Digest, e.Name)
 }
 
-func Render(root, key string, refs []SourceRef, read func(string) ([]byte, error)) ([]byte, error) {
+func Render(root, _ string, refs []SourceRef, read func(string) ([]byte, error)) ([]byte, error) {
 	if len(refs) == 0 {
 		return nil, errors.New("cannot render an empty window")
 	}
-	devices := []string{}
-	descs := map[string][]string{}
 	apps := map[string]bool{}
-	start := refs[0].Start
-	end := start
-	var body strings.Builder
-	body.WriteString("# 跨设备电脑历史\n\n本条由各设备已有摘要按时间归并，未重新生成事实。原始摘要与细节保留在以下来源文件中。\n\n")
-	lastDevice := ""
+	summaries := make([]Summary, 0, len(refs))
 	for _, ref := range refs {
 		p := objectPath(root, ref.Device, ref.Entry)
 		b, err := read(p)
@@ -330,34 +361,51 @@ func Render(root, key string, refs []SourceRef, read func(string) ([]byte, error
 		if err != nil {
 			return nil, err
 		}
-		if ref.Device != lastDevice {
-			devices = append(devices, ref.Device)
-			fmt.Fprintf(&body, "## %s\n\n", ref.Device)
-			lastDevice = ref.Device
-		}
-		descs[ref.Device] = append(descs[ref.Device], s.Meta.Description)
+		summaries = append(summaries, s)
 		for _, a := range s.Meta.Applications {
 			apps[a] = true
 		}
-		if s.Start.Before(start) {
-			start = s.Start
-		}
-		if e := s.Start.Add(s.Duration); e.After(end) {
-			end = e
-		}
-		fmt.Fprintf(&body, "### %s · %s\n\n来源：[原始摘要](<%s>)\n\n", s.Start.Format(time.RFC3339), s.Meta.Title, filepath.ToSlash(p))
-		body.Write(b)
-		if !bytes.HasSuffix(b, []byte("\n")) {
-			body.WriteByte('\n')
-		}
-		body.WriteString("\n")
 	}
-	meta := Frontmatter{Title: fmt.Sprintf("%s–%s UTC · %s", start.Format("2006-01-02 15:04"), end.Format("01-02 15:04"), strings.Join(devices, " + ")), Applications: []string{}}
-	parts := []string{fmt.Sprintf("实际覆盖 %s–%s UTC。", start.Format("01-02 15:04"), end.Format("01-02 15:04"))}
-	for _, d := range devices {
-		parts = append(parts, d+"："+strings.Join(descs[d], " "))
+	// Reuse one native overview verbatim: 6h first, then stable source order.
+	sort.Slice(summaries, func(i, j int) bool {
+		a, b := summaries[i], summaries[j]
+		if a.Duration != b.Duration {
+			return a.Duration > b.Duration
+		}
+		if a.Device != b.Device {
+			return a.Device < b.Device
+		}
+		if !a.Start.Equal(b.Start) {
+			return a.Start.Before(b.Start)
+		}
+		return a.Entry.Name < b.Entry.Name
+	})
+	meta := Frontmatter{Title: summaries[0].Meta.Title, Description: summaries[0].Meta.Description, Applications: []string{}}
+	// Interleave activities, not devices. Source identity remains in state and
+	// archive links; neither transport metadata nor repeated YAML belongs here.
+	sort.SliceStable(summaries, func(i, j int) bool {
+		if !summaries[i].Start.Equal(summaries[j].Start) {
+			return summaries[i].Start.Before(summaries[j].Start)
+		}
+		if summaries[i].Device != summaries[j].Device {
+			return summaries[i].Device < summaries[j].Device
+		}
+		return summaries[i].Entry.Name < summaries[j].Entry.Name
+	})
+	var body strings.Builder
+	escape := strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]")
+	for _, s := range summaries {
+		title := escape.Replace(strings.Join(strings.Fields(s.Meta.Title), " "))
+		fmt.Fprintf(&body, "## [%s](<%s>)\n\n", title, filepath.ToSlash(objectPath(root, s.Device, s.Entry)))
+		text := s.Body
+		// Native summaries use this generic opening heading. The activity title
+		// above replaces it; substantive headings and source text stay intact.
+		if text == "## Memory summary" || strings.HasPrefix(text, "## Memory summary\n") {
+			text = strings.TrimSpace(strings.TrimPrefix(text, "## Memory summary"))
+		}
+		body.WriteString(text)
+		body.WriteString("\n\n")
 	}
-	meta.Description = strings.Join(parts, "\n")
 	for a := range apps {
 		meta.Applications = append(meta.Applications, a)
 	}

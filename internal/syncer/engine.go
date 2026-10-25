@@ -15,23 +15,27 @@ import (
 )
 
 type Engine struct {
-	Config  Config
-	Root    string
-	Connect Connector
-	Now     func() time.Time
+	Config      Config
+	Root        string
+	Connect     Connector
+	Now         func() time.Time
+	Force       bool
+	ArchiveOnly bool
 	// Test-only crash injection; never set by the installed command.
 	PublishHook func(string) error
 }
 type Report struct {
-	Device         string    `json:"device"`
-	Cutoff         time.Time `json:"cutoff"`
-	AlreadySynced  bool      `json:"already_synced"`
-	Upload         []string  `json:"upload"`
-	Download       []string  `json:"download"`
-	Windows        []string  `json:"windows"`
-	Replace        []string  `json:"replace"`
-	Suppressed     []string  `json:"suppressed"`
-	MissingDevices []string  `json:"missing_devices"`
+	Device         string      `json:"device"`
+	Cutoff         time.Time   `json:"cutoff"`
+	AlreadySynced  bool        `json:"already_synced"`
+	Upload         []string    `json:"upload"`
+	Download       []string    `json:"download"`
+	Windows        []string    `json:"windows"`
+	Replace        []string    `json:"replace"`
+	Suppressed     []string    `json:"suppressed"`
+	MissingDevices []string    `json:"missing_devices"`
+	ArchiveOnly    bool        `json:"archive_only,omitempty"`
+	Issues         []FileIssue `json:"issues,omitempty"`
 }
 
 func (e *Engine) now() time.Time {
@@ -59,7 +63,13 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 				e.recordFailure(err)
 			}
 		}()
-		if err = recoverBatch(e.Root, e.Config.Resources()); err != nil {
+		if e.ArchiveOnly {
+			if _, x := os.Stat(filepath.Join(e.Root, "pending.json")); x == nil {
+				return report, errors.New("pending native publication; recover it before archive-only sync")
+			} else if !os.IsNotExist(x) {
+				return report, x
+			}
+		} else if err = recoverBatch(e.Root, e.Config.Resources()); err != nil {
 			return report, err
 		}
 	} else {
@@ -78,8 +88,8 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 	}
 	now := e.now()
 	cutoff, day := DayCutoff(now)
-	report = Report{Device: e.Config.DeviceID, Cutoff: cutoff}
-	if !dry && s.SuccessDay == day {
+	report = Report{Device: e.Config.DeviceID, Cutoff: cutoff, ArchiveOnly: e.ArchiveOnly}
+	if !dry && !e.Force && !e.ArchiveOnly && !unresolvedIssues(s) && s.RenderVersion == renderVersion && s.SuccessDay == day {
 		report.AlreadySynced = true
 		return report, nil
 	}
@@ -109,6 +119,7 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 	own.Cutoff = cutoff
 	// New source bytes are kept in memory for a genuinely read-only dry-run.
 	staged := map[string][]byte{}
+	rejected := map[string]bool{}
 	files, err := os.ReadDir(e.Config.Resources())
 	if err != nil {
 		return report, fmt.Errorf("read native history: %w", err)
@@ -126,7 +137,22 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 			continue
 		}
 		if !f.Type().IsRegular() {
-			return report, fmt.Errorf("native summary is not a regular file: %s", name)
+			rejected[name] = true
+			if x := e.noteIssue(&s, &report, e.Config.DeviceID, name, "not a regular source file", nil, false, dry); x != nil {
+				return report, x
+			}
+			continue
+		}
+		info, x := f.Info()
+		if x != nil {
+			return report, x
+		}
+		if info.Size() > MaxDocument {
+			rejected[name] = true
+			if x := e.noteIssue(&s, &report, e.Config.DeviceID, name, "summary exceeds 8 MiB; original retained", nil, false, dry); x != nil {
+				return report, x
+			}
+			continue
 		}
 		b, x := readLimited(filepath.Join(e.Config.Resources(), name), MaxDocument)
 		if x != nil {
@@ -143,7 +169,21 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 		}
 		summary, x := Parse(device, name, b)
 		if x != nil {
-			return report, x
+			if !errors.Is(x, ErrInvalidSummary) {
+				return report, x
+			}
+			rejected[name] = true
+			if x := e.noteIssue(&s, &report, device, name, x.Error(), b, false, dry); x != nil {
+				return report, x
+			}
+			continue
+		}
+		if summary.MetadataRecovered {
+			if x := e.noteIssue(&s, &report, device, name, "unquoted metadata scalar recovered in memory; original archived unchanged", b, true, dry); x != nil {
+				return report, x
+			}
+		} else {
+			delete(s.Issues, device+"/"+name)
 		}
 		entry := summary.Entry
 		staged[objectPath(e.Root, device, entry)] = b
@@ -300,6 +340,22 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 		}
 		return report, fmt.Errorf("uploaded this device; waiting for initial manifest from %s (native history unchanged)", strings.Join(report.MissingDevices, ", "))
 	}
+	if e.ArchiveOnly {
+		if !dry {
+			completed := e.now()
+			s.LastSuccess, s.Cutoff = &completed, cutoff
+			s.SuccessDay = ""
+			s.FailureSince, s.LastError, s.Notified = nil, "", false
+			// Do not mark native publication complete: a later normal run may
+			// still render the daily windows. This mode never retires sources.
+			if err = writeJSON(filepath.Join(e.Root, "state.json"), s); err != nil {
+				return report, err
+			}
+		}
+		sort.Strings(report.Upload)
+		sort.Strings(report.Download)
+		return report, nil
+	}
 	selected, err := Select(s.Sources, cutoff)
 	if err != nil {
 		return report, err
@@ -326,7 +382,7 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 			report.Suppressed = append(report.Suppressed, key)
 			continue
 		}
-		if exists && reflect.DeepEqual(previous.Inputs, inputs) {
+		if exists && s.RenderVersion == renderVersion && reflect.DeepEqual(previous.Inputs, inputs) {
 			continue
 		}
 		b, x := Render(e.Root, key, refs, func(p string) ([]byte, error) {
@@ -352,7 +408,7 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 	for _, f := range files {
 		name := f.Name()
 		n, ok := s.Native[name]
-		if !ok || knownOutputs[name] {
+		if !ok || knownOutputs[name] || rejected[name] {
 			continue
 		}
 		t, d, x := ParseName(name)
@@ -384,6 +440,7 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 	}
 	completedAt := e.now()
 	batch.Next.LastSuccess = &completedAt
+	batch.Next.RenderVersion = renderVersion
 	batch.Next.SuccessDay = day
 	batch.Next.Cutoff = cutoff
 	batch.Next.FailureSince = nil
