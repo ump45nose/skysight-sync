@@ -210,6 +210,13 @@ func recoverBatch(root, resources string) error {
 	}
 	return applyBatch(root, resources, b, nil)
 }
+func pendingPublication(root string) (bool, error) {
+	_, err := os.Stat(filepath.Join(root, "pending.json"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
 
 func migrationOrigins(root string) (map[string]string, error) {
 	result := map[string]string{}

@@ -46,7 +46,7 @@ func main() {
 	sort.Strings(keys)
 	outputs := []map[string]string{}
 	for _, key := range keys {
-		b, err := syncer.Render(root, key, windows[key], os.ReadFile)
+		b, err := syncer.Render(root, windows[key], os.ReadFile)
 		must(err)
 		t, err := time.Parse(time.RFC3339, key)
 		must(err)

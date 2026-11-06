@@ -15,7 +15,7 @@ import (
 	"github.com/pkg/sftp"
 )
 
-// Remote is deliberately file-only: fn needs no custom daemon or shell commands.
+// Remote is deliberately file-only: the SFTP server needs no custom daemon or shell commands.
 type Remote interface {
 	Read(string, int64) ([]byte, error)
 	WriteAtomic(string, []byte) error
@@ -91,7 +91,7 @@ func ConnectSFTP(ctx context.Context, c Config) (Remote, error) {
 	if _, ok := client.HasExtension("posix-rename@openssh.com"); !ok {
 		_ = client.Close()
 		_ = cmd.Wait()
-		return nil, errors.New("fn SFTP must support atomic posix-rename")
+		return nil, errors.New("SFTP server must support atomic posix-rename")
 	}
 	return &sftpRemote{client: client, cmd: cmd, root: c.RemoteDir}, nil
 }

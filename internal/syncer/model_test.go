@@ -76,7 +76,7 @@ func TestRenderUsesActivityTitlesAndKeepsSourceBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	refs := sel["2026-10-13T06:00:00Z"]
-	b, err := Render(root, "2026-10-13T06:00:00Z", refs, func(p string) ([]byte, error) { return contents[p], nil })
+	b, err := Render(root, refs, func(p string) ([]byte, error) { return contents[p], nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestRenderUsesActivityTitlesAndKeepsSourceBody(t *testing.T) {
 		contents[p] = []byte("tampered")
 		break
 	}
-	if _, err = Render(root, "", refs, func(p string) ([]byte, error) { return contents[p], nil }); err == nil {
+	if _, err = Render(root, refs, func(p string) ([]byte, error) { return contents[p], nil }); err == nil {
 		t.Fatal("archive integrity not checked")
 	}
 }
@@ -191,7 +191,7 @@ func TestRenderCopiesNativeOverviewInStableSourceOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			read := func(p string) ([]byte, error) { return contents[p], nil }
-			raw, err := Render(root, "2026-10-13T06:00:00Z", tc.refs, read)
+			raw, err := Render(root, tc.refs, read)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -209,7 +209,7 @@ func TestRenderCopiesNativeOverviewInStableSourceOrder(t *testing.T) {
 			for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
 				reversed[i], reversed[j] = reversed[j], reversed[i]
 			}
-			again, err := Render(root, "2026-10-13T06:00:00Z", reversed, read)
+			again, err := Render(root, reversed, read)
 			if err != nil || string(raw) != string(again) {
 				t.Fatal("input enumeration changed rendered content", err)
 			}

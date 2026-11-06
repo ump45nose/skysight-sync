@@ -77,10 +77,7 @@ func (e *Engine) Status() (Status, error) {
 	}
 	status := Status{Device: e.Config.DeviceID, Version: Version, LastSuccess: s.LastSuccess, Cutoff: s.Cutoff, Windows: len(s.Published), Suppressed: len(s.Suppressed), FailureSince: s.FailureSince, Error: s.LastError, Restored: s.Restored}
 	status.Issues = sortedIssues(s)
-	_, err = os.Stat(filepath.Join(e.Root, "pending.json"))
-	if err == nil {
-		status.PendingPublication = true
-	} else if !os.IsNotExist(err) {
+	if status.PendingPublication, err = pendingPublication(e.Root); err != nil {
 		return status, err
 	}
 	for device, m := range s.Sources {

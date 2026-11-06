@@ -64,20 +64,18 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 			}
 		}()
 		if e.ArchiveOnly {
-			if _, x := os.Stat(filepath.Join(e.Root, "pending.json")); x == nil {
-				return report, errors.New("pending native publication; recover it before archive-only sync")
-			} else if !os.IsNotExist(x) {
+			if pending, x := pendingPublication(e.Root); x != nil {
 				return report, x
+			} else if pending {
+				return report, errors.New("pending native publication; recover it before archive-only sync")
 			}
 		} else if err = recoverBatch(e.Root, e.Config.Resources()); err != nil {
 			return report, err
 		}
-	} else {
-		if _, x := os.Stat(filepath.Join(e.Root, "pending.json")); x == nil {
-			return report, errors.New("pending publication; run sync before dry-run")
-		} else if !os.IsNotExist(x) {
-			return report, x
-		}
+	} else if pending, x := pendingPublication(e.Root); x != nil {
+		return report, x
+	} else if pending {
+		return report, errors.New("pending publication; run sync before dry-run")
 	}
 	s, err := loadState(e.Root)
 	if err != nil {
@@ -101,13 +99,8 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 	for _, p := range s.Published {
 		knownOutputs[p.Filename] = true
 	}
-	for window, p := range s.Published {
-		_, x := os.Stat(filepath.Join(e.Config.Resources(), p.Filename))
-		if os.IsNotExist(x) {
-			s.Suppressed[window] = true
-		} else if x != nil {
-			return report, x
-		}
+	if err = e.suppressDeleted(&s); err != nil {
+		return report, err
 	}
 	own := s.Sources[e.Config.DeviceID]
 	if own.DeviceID == "" {
@@ -361,12 +354,8 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 		return report, err
 	}
 	// A user may delete a window while the network transfer is in progress.
-	for window, p := range s.Published {
-		if _, x := os.Stat(filepath.Join(e.Config.Resources(), p.Filename)); os.IsNotExist(x) {
-			s.Suppressed[window] = true
-		} else if x != nil {
-			return report, x
-		}
+	if err = e.suppressDeleted(&s); err != nil {
+		return report, err
 	}
 	batch := Batch{Next: cloneState(s)}
 	keys := make([]string, 0, len(selected))
@@ -385,7 +374,7 @@ func (e *Engine) Run(ctx context.Context, dry bool) (report Report, err error) {
 		if exists && s.RenderVersion == renderVersion && reflect.DeepEqual(previous.Inputs, inputs) {
 			continue
 		}
-		b, x := Render(e.Root, key, refs, func(p string) ([]byte, error) {
+		b, x := Render(e.Root, refs, func(p string) ([]byte, error) {
 			if data, ok := staged[p]; ok {
 				return data, nil
 			}
@@ -468,6 +457,16 @@ func (e *Engine) readObject(entry Entry, device string, staged map[string][]byte
 		return nil, fmt.Errorf("archive integrity mismatch: %s", p)
 	}
 	return b, nil
+}
+func (e *Engine) suppressDeleted(s *State) error {
+	for window, p := range s.Published {
+		if _, err := os.Stat(filepath.Join(e.Config.Resources(), p.Filename)); os.IsNotExist(err) {
+			s.Suppressed[window] = true
+		} else if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (e *Engine) recordFailure(cause error) {
 	s, err := loadState(e.Root)

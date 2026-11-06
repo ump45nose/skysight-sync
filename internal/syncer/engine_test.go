@@ -51,7 +51,7 @@ func (h *memoryHub) Close() error { return nil }
 func testClient(t *testing.T, d string, h *memoryHub) *Engine {
 	t.Helper()
 	home := t.TempDir()
-	c := Config{DeviceID: d, InstanceID: d + "-installation", CodexHome: home, SSHTarget: "fn", RemoteDir: "/hub", Devices: []string{"macair", "macpro"}}
+	c := Config{DeviceID: d, InstanceID: d + "-installation", CodexHome: home, SSHTarget: "history-hub", RemoteDir: "/hub", Devices: []string{"macair", "macpro"}}
 	if err := os.MkdirAll(c.Resources(), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,17 @@ func TestPublicationRecoversWithoutDuplicates(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(b.Root, "pending.json")); err != nil {
 		t.Fatal("missing recovery journal")
 	}
-	b.PublishHook = nil
+	if status, err := b.Status(); err != nil || !status.PendingPublication {
+		t.Fatalf("pending publication not reported: %v", err)
+	}
+	if _, err := b.Run(context.Background(), true); err == nil || !strings.Contains(err.Error(), "run sync before dry-run") {
+		t.Fatalf("dry-run ignored the journal: %v", err)
+	}
+	b.ArchiveOnly = true
+	if _, err := b.Run(context.Background(), false); err == nil || !strings.Contains(err.Error(), "recover it before archive-only sync") {
+		t.Fatalf("archive-only ignored the journal: %v", err)
+	}
+	b.PublishHook, b.ArchiveOnly = nil, false
 	r := runOK(t, b)
 	if !r.AlreadySynced {
 		t.Fatal("recovered successful batch not recognized")
@@ -239,6 +249,22 @@ func TestPublicationRecoversWithoutDuplicates(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(b.Root, "pending.json")); !os.IsNotExist(err) {
 		t.Fatal("journal not retired")
+	}
+}
+
+func TestPendingPublication(t *testing.T) {
+	root := t.TempDir()
+	if pending, err := pendingPublication(root); pending || err != nil {
+		t.Fatalf("absent journal: %v %v", pending, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pending.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := pendingPublication(root); !pending || err != nil {
+		t.Fatalf("existing journal: %v %v", pending, err)
+	}
+	if pending, err := pendingPublication(root + "\x00"); pending || err == nil {
+		t.Fatalf("invalid journal path must fail: %v %v", pending, err)
 	}
 }
 

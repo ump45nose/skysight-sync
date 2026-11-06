@@ -342,7 +342,7 @@ func objectPath(root, device string, e Entry) string {
 	return filepath.Join(root, "archive", device, "objects", e.Digest, e.Name)
 }
 
-func Render(root, _ string, refs []SourceRef, read func(string) ([]byte, error)) ([]byte, error) {
+func Render(root string, refs []SourceRef, read func(string) ([]byte, error)) ([]byte, error) {
 	if len(refs) == 0 {
 		return nil, errors.New("cannot render an empty window")
 	}
