@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -54,5 +55,49 @@ func TestInitPreservesExistingConfigurationAndIdentity(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(got, c) {
 			t.Fatalf("existing configuration changed: %+v %v", got, err)
 		}
+	}
+}
+
+func TestStatusPrintsFileIssues(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := command(t, "init", "--device", "macair", "--ssh-target", "history-hub", "--remote-dir", "/srv/private-history"); err != nil {
+		t.Fatal(err)
+	}
+	bad, odd, digest := "2026-10-13T06-00-00-AAAA-6h-memory-summary.md", "2026-10-13T06-20-00-BBBB-10min-memory-summary.md", strings.Repeat("a", 64)
+	recovered := "unquoted metadata scalar recovered in memory; original archived unchanged"
+	state, err := json.Marshal(syncer.State{Sources: map[string]syncer.Manifest{}, Native: map[string]syncer.NativeRef{}, Published: map[string]syncer.Published{}, Suppressed: map[string]bool{}, Issues: map[string]syncer.FileIssue{
+		"macpro/" + bad: {Device: "macpro", Filename: bad, Digest: digest, Reason: "missing YAML frontmatter"},
+		"macair/" + odd: {Device: "macair", Filename: odd, Digest: digest, Reason: recovered, Recovered: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(home, "skysight-sync", "state.json"), state, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	stdout := os.Stdout
+	os.Stdout = out
+	err = command(t, "status")
+	os.Stdout = stdout
+	if err != nil {
+		t.Fatal(err)
+	}
+	printed, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"\n问题 macair/" + odd + "：" + recovered + "\n", "\n问题 macpro/" + bad + "：missing YAML frontmatter\n"} {
+		if !strings.Contains(string(printed), line) {
+			t.Fatalf("missing %q in status:\n%s", line, printed)
+		}
+	}
+	if strings.Contains(string(printed), digest) {
+		t.Fatal("status printed a digest")
 	}
 }

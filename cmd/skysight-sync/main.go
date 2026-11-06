@@ -182,6 +182,9 @@ func run() error {
 		if status.Error != "" {
 			fmt.Printf("错误：%s\n", status.Error)
 		}
+		for _, issue := range status.Issues {
+			fmt.Printf("问题 %s/%s：%s\n", issue.Device, issue.Filename, issue.Reason)
+		}
 		return nil
 	case "install-service":
 		return syncer.InstallService(*configPath)
